@@ -44,7 +44,7 @@ async def successful_payment(payment_id):
             user_id = payments[key][0]
             menu_id = payments[key][2]
             await db.top_up_balance(payments[key][0], payments[key][1])
-            message = await bot.send_message(payments[key][0], text=f'Оплата прошла успешно! 🎉\n\nСумма пополнения - {str(payments[key][1])[:-2]} 💎')
+            message = await bot.send_message(payments[key][0], text=f'Оплата прошла успешно! 🎉\n\nСумма пополнения - {payments[key][1]} 💎')
             afterward = list(filter(lambda a: a == user_id, payments))
             for payment in afterward:
                 payments.pop(payment)
