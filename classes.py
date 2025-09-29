@@ -11,7 +11,7 @@ channel = os.getenv('TG_CHANNEL')
 support = os.getenv('SUPPORT')
 
 
-def create_payment(value, id, menu_id):
+def create_payment(value, id, menu_id, amount):
     Configuration.configure('1136840', 'live_7t-GxgQlqZPJp8m_EuTu0Gcr2bx7YW7s91w9yjD72K4')
     idempotence_key = str(uuid.uuid4())
     payment = Payment.create({
@@ -30,7 +30,7 @@ def create_payment(value, id, menu_id):
         'capture': True,
     }, idempotence_key)
     link = payment.confirmation.confirmation_url
-    payments[link] = (id, value, menu_id)
+    payments[link] = (id, amount, menu_id)
     return link
 
 
@@ -91,11 +91,11 @@ class BackKeyboard(Keyboard):
 class PaymentKeyboard(Keyboard):
     def __init__(self, id, menu_id):
         super().__init__()
-        btn1 = types.InlineKeyboardButton(text='💎 3 (125.00 RUB)', url=create_payment(125.00, id, menu_id), callback_data='check_payment')
-        btn2 = types.InlineKeyboardButton(text='💎 5 (200.00 RUB)', url=create_payment(200.00, id, menu_id), callback_data='check_payment') 
-        btn3 = types.InlineKeyboardButton(text='💎 10 (350.00 RUB)', url=create_payment(350.00, id, menu_id), callback_data='check_payment')
-        btn4 = types.InlineKeyboardButton(text='💎 25 (500.00 RUB)', url=create_payment(500.00, id, menu_id), callback_data='check_payment')
-        btn5 = types.InlineKeyboardButton(text='💎 Безлимит (1000.00 RUB)', url=create_payment(1000.00, id, menu_id), callback_data='check_payment')
+        btn1 = types.InlineKeyboardButton(text='💎 3 (125.00 RUB)', url=create_payment(125.00, id, menu_id, 3), callback_data='check_payment')
+        btn2 = types.InlineKeyboardButton(text='💎 5 (200.00 RUB)', url=create_payment(200.00, id, menu_id, 5), callback_data='check_payment') 
+        btn3 = types.InlineKeyboardButton(text='💎 10 (350.00 RUB)', url=create_payment(350.00, id, menu_id, 10), callback_data='check_payment')
+        btn4 = types.InlineKeyboardButton(text='💎 25 (500.00 RUB)', url=create_payment(500.00, id, menu_id, 25), callback_data='check_payment')
+        btn5 = types.InlineKeyboardButton(text='💎 Безлимит (1000.00 RUB)', url=create_payment(1000.00, id, menu_id, 999999), callback_data='check_payment')
         btn6 = types.InlineKeyboardButton(text='Назад', callback_data='main_menu')
         self.markup.row(btn1, btn2)
         self.markup.row(btn3, btn4)
