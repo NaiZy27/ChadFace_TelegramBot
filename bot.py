@@ -34,6 +34,7 @@ async def func(mode: Request):
     await successful_payment(id)
     return JSONResponse(content={}, status_code=200)
 
+
 async def on_startup():
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
     server = uvicorn.Server(config)
@@ -60,7 +61,7 @@ async def successful_payment(payment_id):
 @bot.callback_query_handler(func=lambda call: call.data.startswith == 'del_notification')
 async def del_notification(call):
     await bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
-    await bot.answer_callback_query(call.id)   
+    await bot.answer_callback_query(callback_query_id=call.id, text='💥 Уведомление удалено')
 
 
 @bot.message_handler(commands=['start'])
@@ -73,7 +74,8 @@ async def start(message):
         await create_menu(user_id)
     else:
         keyboard = MembershipKeyboard()
-        await bot.send_message(user_id, text='❗ ДЛЯ РАБОТЫ С БОТОМ ПОДПИШИТЕСЬ НА КАНАЛ', reply_markup=keyboard.markup)
+        await bot.send_message(chat_id=user_id, text='❗ ДЛЯ РАБОТЫ С БОТОМ ПОДПИШИТЕСЬ НА КАНАЛ', reply_markup=keyboard.markup)
+    await bot.delete_message(chat_id=user_id, message_id=message.message_id)
 
 
 async def create_menu(user_id, mode=False, payment=False, message=None, menu_id=None):
