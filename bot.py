@@ -1,6 +1,7 @@
-from classes import MenuKeyboard, MembershipKeyboard, SupportKeyboard, BackKeyboard, PaymentKeyboard, MenuKeyboardNoLimit
+from classes import MenuKeyboard, MembershipKeyboard, SupportKeyboard, BackKeyboard, PaymentKeyboard, MenuKeyboardNoLimit, DeleteKeyboard
 from pay import payments
 from telebot.async_telebot import AsyncTeleBot
+from telebot.util import content_type_media
 import asyncio
 import uvicorn
 from google.genai import types
@@ -12,17 +13,19 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import asyncio
 
-app = FastAPI()
-
 load_dotenv()
 
+app = FastAPI()
 token = os.getenv('TG_BOT_TOKEN')
-bot = AsyncTeleBot(token)
 key = os.getenv('API_KEY')
+bot = AsyncTeleBot(token)
+client = genai.Client(api_key=key)
 prompt = os.getenv('PROMPT')
 menu = os.getenv('MENU')
-
 users_states = {}
+gemini_semaphore = asyncio.Semaphore(30)
+non_photo = [i for i in content_type_media if i != 'photo']
+
 
 @app.post('/')
 async def func(mode: Request):
@@ -30,7 +33,6 @@ async def func(mode: Request):
     id = t['object']['id']
     await successful_payment(id)
     return JSONResponse(content={}, status_code=200)
-
 
 async def on_startup():
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
@@ -44,13 +46,20 @@ async def successful_payment(payment_id):
             user_id = payments[key][0]
             menu_id = payments[key][2]
             await db.top_up_balance(payments[key][0], payments[key][1])
-            message = await bot.send_message(payments[key][0], text=f'Оплата прошла успешно! 🎉\n\nСумма пополнения - {payments[key][1]} 💎')
+            close_keyboard = DeleteKeyboard()
+            message = await bot.send_message(chat_id=payments[key][0], text=f'🎉 Оплата прошла успешно!\n\n\n💎 Пополнено токенов - {payments[key][1]}', reply_markup=close_keyboard)
             afterward = list(filter(lambda a: a == user_id, payments))
             for payment in afterward:
                 payments.pop(payment)
             await asyncio.sleep(10)
             await create_menu(user_id, mode=None, payment=True, message=message, menu_id=menu_id)
             break
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith == 'del_notification')
+async def del_notification(call):
+    await bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+    await bot.answer_callback_query(call.id)   
 
 
 @bot.message_handler(commands=['start'])
@@ -64,11 +73,6 @@ async def start(message):
     else:
         keyboard = MembershipKeyboard()
         await bot.send_message(user_id, text='❗ ДЛЯ РАБОТЫ С БОТОМ ПОДПИШИТЕСЬ НА КАНАЛ', reply_markup=keyboard.markup)
-
-
-@bot.message_handler(func=lambda message: True)
-async def delete_user_message(message):
-    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
 
 async def create_menu(user_id, mode=False, payment=False, message=None, menu_id=None):
@@ -118,42 +122,57 @@ async def get_photo1(call):
         await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
                                 caption='Пришлите фото ⬇️',
                                 reply_markup=back_keyboard.markup)
-        users_states[user_id] = 'WAITING_FOR_PHOTO'
+        users_states[user_id] = [call.message.message_id]
     else:
         await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
                                 caption='❌ У вас нет токенов, если хотите получить оценку внешности - пополните баланс',
                                 reply_markup=back_keyboard.markup)
 
 
-@bot.message_handler(func=lambda message: users_states[message.from_user.id] == 'WAITING_FOR_PHOTO', content_types=['photo'])
+@bot.message_handler(func=lambda message: message.from_user.id in users_states, content_types=non_photo)
+async def delete_non_photo_messages(message):
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+
+
+@bot.message_handler(func=lambda message: message.from_user.id in users_states, content_types=['photo'])
 async def get_photo2(message):
+    user_id = message.from_user.id
     photo = message.photo[-1].file_id
+    users_states[user_id].append(message.message_id)
+    menu_id = users_states[user_id][0]
+    await bot.delete_message(chat_id=user_id, message_id=menu_id)
     await rate_photo(message, photo)
     
 
 async def rate_photo(message, photo):
     user_id = message.from_user.id
-    client = genai.Client(api_key=key)
     file_info = await bot.get_file(photo)
     image_bytes = await bot.download_file(file_info.file_path)
     analysis_message = await bot.send_message(message.from_user.id, text='🔍 Анализ фотографии . . .')
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[
-            types.Part.from_bytes(
-                data=image_bytes,
-                mime_type='image/jpeg',
-            ),
-            prompt
-        ]
-    )
-    answer = response.text
-    await bot.delete_message(chat_id=message.from_user.id, message_id=analysis_message.message_id)
-    await bot.send_photo(message.from_user.id, photo=photo, caption='🍷 Результат анализа фотографии:')
-    await bot.send_message(message.from_user.id, text=answer)
-    await db.charge_off_balance(user_id)
-    del users_states[user_id]
-    await asyncio.sleep(10)
+    await bot.delete_message(chat_id=message.from_user.id, message_id=users_states[user_id][1])
+    async with gemini_semaphore:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                    prompt
+                ]
+            )
+        )
+        answer = response.text
+        await bot.delete_message(chat_id=message.from_user.id, message_id=analysis_message.message_id)
+        await bot.send_photo(message.from_user.id, photo=photo, caption='🍷 Результат анализа фотографии:')
+        await bot.send_message(message.from_user.id, text=answer)
+        await db.charge_off_balance(user_id)
+        del users_states[user_id]
+        asyncio.create_task(delayed_create_menu(user_id, delay=10))
+
+
+async def delayed_create_menu(user_id, delay):
+    await asyncio.sleep(delay)
     await create_menu(user_id)
     
 
@@ -174,6 +193,11 @@ async def get_support(call):
     await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
                              caption='🍷 Поддержка работает с 08 до 23 по МСК. Ваше обращение обязательно будет рассмотрено',
                              reply_markup=support_keyboard.markup)
+    
+
+@bot.message_handler(func=lambda message: True, content_types=content_type_media)
+async def delete_user_message(message):
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
 
 async def main():
