@@ -10,7 +10,6 @@ load_dotenv()
 channel = os.getenv('TG_CHANNEL')
 support = os.getenv('SUPPORT')
 
-
 def create_payment(value, id, menu_id, amount):
     Configuration.configure('1136840', 'live_7t-GxgQlqZPJp8m_EuTu0Gcr2bx7YW7s91w9yjD72K4')
     idempotence_key = str(uuid.uuid4())
@@ -101,3 +100,9 @@ class PaymentKeyboard(Keyboard):
         self.markup.row(btn3, btn4)
         self.markup.row(btn5)
         self.markup.row(btn6)
+
+class DeleteKeyboard(Keyboard):
+    def __init__(self):
+        super().__init__()
+        btn1 = types.InlineKeyboardButton(text='🗑 Удалить', callback_data='del_notification')
+        self.markup.row(btn1)
