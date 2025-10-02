@@ -44,10 +44,11 @@ async def successful_payment(payment_id):
     for key in payments:
         if payment_id in key:
             user_id = payments[key][0]
+            amount = payments[key][1]
             menu_id = payments[key][2]
-            await db.top_up_balance(payments[key][0], payments[key][1])
+            await db.top_up_balance(user_id, amount)
             close_keyboard = DeleteKeyboard()
-            message = await bot.send_message(chat_id=payments[key][0], text=f'🎉 Оплата прошла успешно!\n\n\n💎 Пополнено токенов - {payments[key][1]}', reply_markup=close_keyboard)
+            message = await bot.send_message(chat_id=user_id, text=f'🎉 Оплата прошла успешно!\n\n\n💎 Пополнено токенов - {amount}', reply_markup=close_keyboard.markup)
             afterward = list(filter(lambda a: a == user_id, payments))
             for payment in afterward:
                 payments.pop(payment)
