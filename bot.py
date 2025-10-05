@@ -1,8 +1,13 @@
-from classes import MenuKeyboard, MembershipKeyboard, SupportKeyboard, BackKeyboard, PaymentKeyboard, MenuKeyboardNoLimit, DeleteKeyboard
+from classes import MenuKeyboard, MembershipKeyboard, SupportKeyboard, BackKeyboard, MenuKeyboardNoLimit, DeleteKeyboard, get_payment_keyboard
+from ref import ref_codes
 from pay import payments
-from telebot.async_telebot import AsyncTeleBot
-from telebot.util import content_type_media
-import asyncio
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, StateFilter
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import Router
 import uvicorn
 from google.genai import types
 from google import genai
@@ -15,22 +20,28 @@ import asyncio
 
 load_dotenv()
 
-app = FastAPI()
-token = os.getenv('TG_BOT_TOKEN')
 key = os.getenv('API_KEY')
-bot = AsyncTeleBot(token)
 client = genai.Client(api_key=key)
 prompt = os.getenv('PROMPT')
+gemini_semaphore = asyncio.Semaphore(20)
+
+app = FastAPI()
+token = os.getenv('TG_BOT_TOKEN')
+bot = Bot(token=token)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+router = Router()
 menu = os.getenv('MENU')
-users_states = {}
-gemini_semaphore = asyncio.Semaphore(30)
-non_photo = [i for i in content_type_media if i != 'photo']
+
+
+class UserState(StatesGroup):
+    waiting_for_photo = State()
 
 
 @app.post('/')
 async def func(mode: Request):
-    t = await mode.json()
-    id = t['object']['id']
+    request_data = await mode.json()
+    id = request_data['object']['id']
     await successful_payment(id)
     return JSONResponse(content={}, status_code=200)
 
@@ -44,115 +55,114 @@ async def on_startup():
 async def successful_payment(payment_id):
     for key in payments:
         if payment_id in key:
-            user_id = payments[key][0]
-            amount = payments[key][1]
-            menu_id = payments[key][2]
-            await db.top_up_balance(user_id, amount)
+            user_id, amount, value = payments[key]
+            del payments[key]
+            await db.top_up_balance(user_id, amount, value)
             close_keyboard = DeleteKeyboard()
-            message = await bot.send_message(chat_id=user_id, text=f'🎉 Оплата прошла успешно!\n\n\n💎 Пополнено токенов - {amount}', reply_markup=close_keyboard.markup)
-            afterward = list(filter(lambda a: a == user_id, payments))
-            for payment in afterward:
-                payments.pop(payment)
-            await asyncio.sleep(10)
-            await create_menu(user_id, mode=None, payment=True, message=message, menu_id=menu_id)
+            if amount != 0:
+                await bot.send_message(chat_id=user_id, text=f'🎉 Оплата прошла успешно!\n\n\n💎 Пополнено токенов - {amount}', reply_markup=close_keyboard.markup)
+            else:
+                await bot.send_message(chat_id=user_id, text='🎉 Оплата прошла успешно!\n\n\n💎 У вас безлимит', reply_markup=close_keyboard.markup)
             break
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith == 'del_notification')
-async def del_notification(call):
+@router.callback_query(F.data.startswith('del_notification'))
+async def del_notification(call: CallbackQuery):
     await bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
     await bot.answer_callback_query(callback_query_id=call.id, text='💥 Уведомление удалено')
 
 
-@bot.message_handler(commands=['start'])
-async def start(message):
+@router.message(Command('start'))
+async def start(message: Message, state: FSMContext):
+    ref_code = message.text.split()[1] if len(message.text.split()) > 1 else None
     user_id = message.from_user.id
-    if await db.find_user(user_id) == None:
+    if await db.find_user(user_id) is None:
         await db.create_user(user_id)
-    user_member = await bot.get_chat_member('@chadface_channel', user_id)
+        if ref_code in ref_codes:
+            await db.top_up_balance(user_id, 1, 0)
+            await db.adjust_referal(user_id, ref_code)
+    user_member = await bot.get_chat_member(chat_id='@chadface_channel', user_id=user_id)
     if user_member.status in ['member', 'administrator', 'creator']:
-        await create_menu(user_id)
+        await create_menu(user_id, state=state)
     else:
         keyboard = MembershipKeyboard()
         await bot.send_message(chat_id=user_id, text='❗ ДЛЯ РАБОТЫ С БОТОМ ПОДПИШИТЕСЬ НА КАНАЛ', reply_markup=keyboard.markup)
     await bot.delete_message(chat_id=user_id, message_id=message.message_id)
 
 
-async def create_menu(user_id, mode=False, payment=False, message=None, menu_id=None):
+async def create_menu(user_id: int, state: FSMContext, mode=False, message=None, menu_id=None):
     user = await db.find_user(user_id)
-    if user.balance > 99999:
+    await state.clear()
+    if user.unlimit:
         menu_keyboard = MenuKeyboardNoLimit()
     else:
-        menu_keyboard = MenuKeyboard(user.balance)    
+        menu_keyboard = MenuKeyboard(user.balance)
 
-    if mode == True:
-        await bot.edit_message_caption(chat_id=user_id, message_id=message.message_id,
-                                caption='🍷 Личный кабинет', reply_markup=menu_keyboard.markup)
-    elif mode == False:
+    if mode:
+        target_id = menu_id if menu_id is not None else message.message_id
+        await bot.edit_message_caption(chat_id=user_id, message_id=target_id,
+                            caption='🍷 Личный кабинет', reply_markup=menu_keyboard.markup)
+    else:
         await bot.send_photo(chat_id=user_id, photo=menu, caption='🍷 Личный кабинет', reply_markup=menu_keyboard.markup)
-    
-    if payment:
-        await bot.delete_message(user_id, message.message_id)
-        await bot.edit_message_caption(chat_id=user_id, message_id=menu_id,
-                                caption='🍷 Личный кабинет', reply_markup=menu_keyboard.markup)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('main_menu'))
-async def main_menu(call):
+@router.callback_query(F.data.startswith('main_menu'))
+async def main_menu(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
-    await create_menu(user_id=user_id, mode=True, payment=False, message=call.message)
+    await create_menu(user_id=user_id, state=state, mode=True, message=call.message, menu_id=None)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('check_membership'))
-async def check_membership(call):
+@router.callback_query(F.data.startswith('check_membership'))
+async def check_membership(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
-    if await db.find_user(user_id) == None:
+    if await db.find_user(user_id) is None:
         await db.create_user(user_id)
     user_member = await bot.get_chat_member('@chadface_channel', user_id)
     if user_member.status in ['member', 'administrator', 'creator']:
-        await bot.delete_message(call.message.chat.id, call.message.message_id)
-        await create_menu(user_id)
+        await bot.delete_message(chat_id=user_id, message_id=call.message.message_id)
+        await create_menu(user_id=user_id, state=state)
     else:
-        await start(call)
+        await bot.answer_callback_query(callback_query_id=call.id, text='❗ Вы не подписаны!')
          
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('check_rating'))
-async def get_photo1(call):
+@router.callback_query(F.data.startswith('check_rating'))
+async def get_photo1(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     user = await db.find_user(user_id)
     back_keyboard = BackKeyboard()
-    if user.balance > 0:
+    if user.balance > 0 or user.unlimit:
         await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
                                 caption='Пришлите фото ⬇️',
                                 reply_markup=back_keyboard.markup)
-        users_states[user_id] = [call.message.message_id]
+        await state.update_data(message_id=call.message.message_id)
+        await state.set_state(UserState.waiting_for_photo)
+
     else:
         await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
                                 caption='❌ У вас нет токенов, если хотите получить оценку внешности - пополните баланс',
                                 reply_markup=back_keyboard.markup)
 
 
-@bot.message_handler(func=lambda message: message.from_user.id in users_states, content_types=non_photo)
-async def delete_non_photo_messages(message):
-    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-
-
-@bot.message_handler(func=lambda message: message.from_user.id in users_states, content_types=['photo'])
-async def get_photo2(message):
-    user_id = message.from_user.id
+@router.message(UserState.waiting_for_photo, F.photo)
+async def get_photo2(message: Message, state: FSMContext):
     photo = message.photo[-1].file_id
-    users_states[user_id].append(message.message_id)
-    menu_id = users_states[user_id][0]
-    await bot.delete_message(chat_id=user_id, message_id=menu_id)
-    await rate_photo(message, photo)
+    data = await state.get_data()
+    message_id = data.get('message_id')
+    await state.update_data(photo_id=photo, photo_message_id=message.message_id)
+    await rate_photo(message, photo, message_id, state)
     
 
-async def rate_photo(message, photo):
+async def rate_photo(message: Message, photo: str, menu_id: int, state: FSMContext):
     user_id = message.from_user.id
     file_info = await bot.get_file(photo)
-    image_bytes = await bot.download_file(file_info.file_path)
-    analysis_message = await bot.send_message(message.from_user.id, text='🔍 Анализ фотографии . . .')
-    await bot.delete_message(chat_id=message.from_user.id, message_id=users_states[user_id][1])
+    image_io = await bot.download_file(file_info.file_path)
+    image_bytes = image_io.getvalue()
+    await bot.send_photo(chat_id=user_id, photo=photo)
+    await bot.delete_message(chat_id=user_id, message_id=menu_id)
+    analysis_message = await bot.send_message(chat_id=user_id, text='🔍 Анализ фотографии . . .')
+    photo_data = await state.get_data()
+    photo_message_id = photo_data.get('photo_message_id')
+    await bot.delete_message(chat_id=user_id, message_id=photo_message_id)
     async with gemini_semaphore:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
@@ -165,48 +175,56 @@ async def rate_photo(message, photo):
                 ]
             )
         )
-        answer = response.text
-        await bot.delete_message(chat_id=message.from_user.id, message_id=analysis_message.message_id)
-        await bot.send_photo(message.from_user.id, photo=photo, caption='🍷 Результат анализа фотографии:')
-        await bot.send_message(message.from_user.id, text=answer)
+        answer = f'🍷 Результат анализа фотографии:\n\n{response.text}'
+        await bot.delete_message(chat_id=user_id, message_id=analysis_message.message_id)
+        await bot.send_message(chat_id=user_id, text=answer)
+        await state.clear()
         await db.charge_off_balance(user_id)
-        del users_states[user_id]
-        asyncio.create_task(delayed_create_menu(user_id, delay=10))
+        asyncio.create_task(delayed_create_menu(user_id, delay=7))
 
 
-async def delayed_create_menu(user_id, delay):
+async def delayed_create_menu(user_id: int, delay: int):
     await asyncio.sleep(delay)
-    await create_menu(user_id)
+    state = FSMContext(storage=storage, key=f"user:{user_id}")
+    await create_menu(user_id, state=state)
     
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('top_up_balance'))
-async def top_up_balance(call):
+@router.callback_query(F.data.startswith('top_up_balance'))
+async def top_up_balance(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     menu_id = call.message.message_id
-    payment_keyboard = PaymentKeyboard(user_id, menu_id)
+    payment_keyboard = await get_payment_keyboard(user_id)
     await bot.edit_message_caption(chat_id=user_id, message_id=menu_id,
-                             caption='🍷 Выберите количество токенов',
-                             reply_markup=payment_keyboard.markup)
+                             caption='🍷 Выберите количество токенов\n\n❗ 1 токен  —  1 оценка внешности',
+                             reply_markup=payment_keyboard)
        
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('get_support'))
-async def get_support(call):
+@router.callback_query(F.data.startswith('get_support'))
+async def get_support(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
     support_keyboard = SupportKeyboard()
     await bot.edit_message_caption(chat_id=user_id, message_id=call.message.message_id,
-                             caption='🍷 Поддержка работает с 08 до 23 по МСК. Ваше обращение обязательно будет рассмотрено',
+                             caption='🍷 Поддержка работает с 08 до 23 по МСК',
                              reply_markup=support_keyboard.markup)
     
 
-@bot.message_handler(func=lambda message: True, content_types=content_type_media)
-async def delete_user_message(message):
+@router.message(UserState.waiting_for_photo)
+async def delete_non_photo_messages(message: Message):
+    if message.photo:
+        return
+    await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+
+
+@router.message(~StateFilter(UserState.waiting_for_photo))
+async def delete_user_message(message: Message):
     await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
 
 
 async def main():
     await db.create_db()
     await on_startup()
-    await bot.polling(none_stop=True, interval=0)
+    dp.include_router(router)
+    await dp.start_polling(bot)
 
 
 if __name__ == '__main__':
