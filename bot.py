@@ -147,9 +147,11 @@ async def get_photo1(call: CallbackQuery, state: FSMContext):
 async def get_photo2(message: Message, state: FSMContext):
     photo = message.photo[-1].file_id
     data = await state.get_data()
-    message_id = data.get('message_id')
+    menu_id = data.get('message_id')
+    if menu_id:
+        await bot.edit_message_caption(chat_id=message.chat.id, message_id=menu_id, caption="🔒 Меню закрыто", reply_markup=None)
     await state.update_data(photo_id=photo, photo_message_id=message.message_id)
-    await rate_photo(message, photo, message_id, state)
+    await rate_photo(message, photo, menu_id, state)
     
 
 async def rate_photo(message: Message, photo: str, menu_id: int, state: FSMContext):
